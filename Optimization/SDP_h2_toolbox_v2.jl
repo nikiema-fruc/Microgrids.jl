@@ -4,17 +4,17 @@ using Microgrids
 
 # Structure describing the state of the Microgrid
 struct State
-    Pnl::Float64
-    LoH::Float64
-    Ebatt::Float64
-    δ::Int64
+    Pnl
+    LoH
+    Ebatt
+    δ
 end
 """
     State(a::NTuple{6, Float64})
 
 TBW
 """
-function State(a::NTuple{6,Float64})
+function State(a::NTuple{6,Float32})
     State(a[1], a[2], a[3], a[4])
 end
 
@@ -59,7 +59,7 @@ end
 
 TBW
 """
-function time_dyn_backward!(time::Array{Float64,1}, dt, mi_l::Vector{Int64})
+function time_dyn_backward!(time::Array{Float64,1}, dt, mi_l)
 
     if time[1] > 0
         next_hi = time[1] - dt
@@ -71,8 +71,13 @@ function time_dyn_backward!(time::Array{Float64,1}, dt, mi_l::Vector{Int64})
             next_di = time[2] - 1
             next_mi = time[3]
         else
-            next_di = mi_l[Int(time[3])-1]
-            next_mi = time[3] - 1
+            if time[3]==1
+                next_di=30
+                next_mi=12
+            else
+                next_di = mi_l[Int(time[3])-1]
+                next_mi = time[3] - 1
+            end
         end
     end
 
@@ -139,11 +144,27 @@ function u_bounds(x::State, mg)
         u_max = min(Pdis_max, x.Pnl)
         u_min = ifelse(Pfc_max >= x.Pnl, max(Pcha_max, x.Pnl - Pfc_max), min(Pdis_max, x.Pnl - Pfc_max))
     else
-        u_max = max(min(x.Pnl - Pel_max, 0.0), Pcha_max)
+        u_max = ifelse(x.Pnl<=Pel_min,max(min(x.Pnl - Pel_max, 0.0), Pcha_max),max(Pcha_max,x.Pnl))
         u_min = max(Pcha_max, x.Pnl - Pfc_max)
     end
 
     return u_min, u_max, Pel_min, Pfc_min
+end
+
+function u_bounds_all(x,mg)
+   
+    Pel_max, Pfc_max, Pel_min, Pfc_min = h2_bounds(x, mg)
+    Pcha_max, Pdis_max = bt_bounds(x, mg)
+
+    if x.Pnl >= 0.0f0
+        u_max = min(Pdis_max, x.Pnl)
+        u_min = ifelse(Pfc_max >= x.Pnl, max(Pcha_max, x.Pnl - Pfc_max), min(Pdis_max, x.Pnl - Pfc_max))
+    else
+        u_max = max(min(x.Pnl - Pel_max, 0.0f0), Pcha_max)
+        u_min = max(Pcha_max, x.Pnl- Pfc_max)
+    end
+
+    return u_min, u_max, max(Pel_min,Pel_max), min(Pfc_min,Pfc_max)
 end
 
 
@@ -230,7 +251,7 @@ function u_range!(u_range, x::State, mg, step=100, db=10, da=10)
             u_range[1] = u_max
             nu = 1
         else
-            if p2 <= u_max && p2 >= u_min
+            if  u_min<=p2<=u_max
                 if x.Pnl >= u_min
                     if p1 >= u_min
                         na = min(Int(div(p1 - u_min, step) + 2), da)
@@ -261,7 +282,7 @@ function u_range!(u_range, x::State, mg, step=100, db=10, da=10)
                     nu = nb
                 end
             else
-                if x.Pnl <= u_max && x.Pnl >= u_min
+                if u_min<=x.Pnl<=u_max
                     if p1 >= u_min
                         na = min(Int(div(p1 - u_min, step) + 2), da)
                         for i = 0:na-1
@@ -274,7 +295,7 @@ function u_range!(u_range, x::State, mg, step=100, db=10, da=10)
                         nu = 1
                     end
                 else
-                    if p1 <= u_max && p1 >= u_min
+                    if u_min<=p1<=u_max
                         na = min(Int(div(p1 - u_min, step) + 2), da)
                         for i = 0:na-1
                             u_range[i+1] = u_min + (i * (p1 - u_min)) / (na - 1)
@@ -365,39 +386,47 @@ function m_pnl()
 
 end
 
-"""
-    gen_mark_c(probs,cats,ini)
+function gen_mark(probs,cats,ini,mod,data=data)
 
-TBW
-"""
-function gen_mark_c(probs,cats,ini)
-
-    Pnl=zeros(Float64,8760)
+    Pnl=zeros(Float32,8760)
     Pnl[1]=ini
-    for i=2:8760
+    cat=Int(abs(div(Pnl[1] - cats[1, 1, 1], cats[1,1, 2] - cats[1,1,1])) + 1)
+  @inbounds  for i=2:8760
         h=data.Hour[i]
         m=data.Month[i]
          h_prev=data.Hour[i-1]
         m_prev=data.Month[i-1]
-       cat = Int(abs(div(Pnl[i-1] - cats[m_prev, h_prev+1, 1], cats[m_prev, h_prev+1, 2] - cats[m_prev, h_prev+1, 1])) + 1)
+       
 
         if cat > 16
             cat = 16
         end
-        prob_val=zeros(Float64,count(x->(x>0.),probs[m_prev,h_prev+1,:,cat]))
-        indexes=zeros(Int64,length(prob_val))
+        prob_val=zeros(Float32,count(x->(x>0.0f0),probs[m_prev,h_prev+1,:,cat]))
+        indexes=zeros(Int32,length(prob_val))
         z=0
         
         
-            for j=1:length(probs[m_prev,h_prev+1,:,cat])
+          @inbounds  for j=1:length(probs[m_prev,h_prev+1,:,cat])
                
-                if probs[m_prev,h_prev+1,j,cat] > 0.
+                if probs[m_prev,h_prev+1,j,cat] > 0.0f0
                     z=z+1
                    indexes[z]=j
                     prob_val[z]=probs[m_prev,h_prev+1,j,cat]
                 end
             end
-        Pnl[i]=cats[m,h+1,indexes[sample(Weights(prob_val))]+1]
+            index_w=sample(Weights(prob_val))
+            if mod==1
+                Pnl[i]=cats[m,h+1,indexes[index_w]]
+            elseif mod==2
+                Pnl[i]=(cats[m,h+1,indexes[index_w]]+cats[m,h+1,indexes[index_w]+1])/2
+            elseif mod==3
+                Pnl[i]=cats[m,h+1,indexes[index_w]+1]
+            elseif mod==4
+                Pnl[i]=cats[m,h+1,indexes[index_w]] + rand()*(cats[m,h+1,indexes[index_w]+1]-cats[m,h+1,indexes[index_w]])
+            end
+
+                cat = indexes[index_w]
+        
     end
     return Pnl
 end
@@ -423,10 +452,65 @@ function dispatch_1(s::State, mg::Microgrid)
 
     Pbatt_cmax, Pbatt_dmax = bt_bounds(s, mg)
     Pel_max, Pfc_max, Pel_min, Pfc_min = h2_bounds(s, mg)
-    Pnl, Pgen, Pbatt, Pspill, Pshed, Pdump, Pelyz, Pfc = Microgrids.dispatch_1(s.Pnl, Pbatt_cmax, Pbatt_dmax, 0., 0., Pel_min, Pel_max, Pfc_min, Pfc_max)
+    Pnl, Pgen, Pbatt, Pspill, Pshed, Pdump, Pelyz, Pfc = Microgrids.dispatch_1(s.Pnl, Pbatt_cmax, Pbatt_dmax, 0., 0., -Pel_min, -Pel_max, Pfc_min, Pfc_max)
 
     return Pbatt, Pfc - Pelyz
 end
+function dispatch_2(s::State, mg::Microgrid)
+
+    Pbatt_cmax, Pbatt_dmax = bt_bounds(s, mg)
+    Pel_max, Pfc_max, Pel_min, Pfc_min = h2_bounds(s, mg)
+    Pnl, Pgen, Pbatt, Pspill, Pshed, Pdump, Pelyz, Pfc = Microgrids.dispatch_2(s.Pnl, Pbatt_cmax, Pbatt_dmax, 0., 0., -Pel_min, -Pel_max, Pfc_min, Pfc_max)
+
+    return Pbatt, Pfc - Pelyz
+end
+function u2alpha(u,s,mg,ϵ=0.001f0)
+    α=0.0f0
+    Pbatt_cmax, Pbatt_dmax = bt_bounds(s, mg)
+    Pel_max, Pfc_max, Pel_min, Pfc_min = h2_bounds(s, mg)
+    Pnl=s.Pnl
+    u1=dispatch_1(s,mg)[1]
+    u2=dispatch_2(s,mg)[1]
+
+    u3=max(Pnl-Pfc_max,Pbatt_cmax)
+  
+    
+    if  (min(u1,u2) -ϵ) <=u<= (max(u1,u2) +ϵ)
+        if u1==u2
+            α=1.0f0
+        else
+            α=(u-u2)/(u1-u2)
+        end
+    elseif (min(u2,u3)-ϵ)<=u<=(max(u3,u2)+ϵ)
+        if u2==u3
+            α=0.0f0
+        else
+            α=(u-u2)/(u2-u3)
+        end
+    else
+        throw(ErrorException("Input must be non-negative, got $(u1),$(u2),$(u3),$(u),$(s.Pnl);$(s.LoH),$(s.Ebatt),$(s.δ) h2 stuffs, $(Pel_max),$(Pel_min)"))
+       
+    end
+
+   
+    return Float32(α)
+end
+ function  u2alpha_bl(u,s,mg,ϵ=0.001f0)
+    α=0.0f0
+   
+    Pbt_min, Pbt_max, Pel_min, Pfc_min = u_bounds_all(s, mg)
+    Pnl=s.Pnl
+    u1=ifelse(Pnl>=0.0f0,ifelse(Pnl-Pfc_min<Pbt_max<Pnl,Pnl-Pfc_min,Pbt_max),max(Pbt_min,Pnl))
+    u2=ifelse(Pnl>=0.0f0,ifelse(Pnl-Pfc_min<0.0f0,ifelse(Pbt_max==Pnl,Pbt_max,max(Pnl-Pfc_min,Pbt_min)),max(0.0f0,Pbt_min)),ifelse(Pnl<=Pel_min,Pbt_max,max(Pbt_min,Pnl)))
+    u3=Pbt_min
+
+    α=ifelse((min(u1,u2) -ϵ) <=u<= (max(u1,u2) +ϵ),ifelse(u1==u2,1.0f0,(u-u2)/(u1-u2)),ifelse(u2==u3,0.0f0,(u-u2)/(u2-u3)))
+       
+
+   
+    return Float32(α)
+end
+    
 
 function cost_to_go(pen::Float64,Pshed::Float64,Ph2::Float64,Pbt::Float64,δ::Int64,fc::ProductionUnit,el::ProductionUnit,bt::Battery,d_rt,d_st)
     c=0
@@ -594,15 +678,15 @@ function DPrecursion_jopt(K::Int64, pen::Float64,ref::Vector{Float64},σ::Float6
 
                 xk = State(Pnl_grid[m, h+1, pnl], LoH_grid[loh], Ebt_grid[ebt], δ_grid[δ])
 
-                nu = u_range!(selectdim(Pbt_grid, 1, threadid()), xk, mg, 5, 24, 24) #peut changer de taille à régler
+                nu = u_range!(selectdim(Pbt_grid, 1, threadid()-1), xk, mg, 5, 24, 24) #peut changer de taille à régler
                 err=(xk.Pnl-ref[k])
                 #CREATE UGRID
                 Jk_xu_min = Inf
-                u_opt = Pbt_grid[threadid(), 1]
+                u_opt = Pbt_grid[threadid()-1, 1]
 
 
                 @inbounds for u_i = 1:nu  #gérer les situations où il n'y pas de u
-                    uk = Pbt_grid[threadid(), u_i]
+                    uk = Pbt_grid[threadid()-1, u_i]
                     Jk_xu = 0.0
 
 
@@ -635,7 +719,7 @@ function DPrecursion_jopt(K::Int64, pen::Float64,ref::Vector{Float64},σ::Float6
     return Jopt
 
 end
-function DP_jopt(K::Int64, pen::Float64,Pnl::Vector{Float64},mg,d_rt::Float64=deg_ratio_rt,d_st::Float64=deg_ratio_st)
+function DP_jopt(K::Int64, pen::Float64,Pnl,mg,d_rt=deg_ratio_rt,d_st=deg_ratio_st)
 
     el=mg.electrolyzer[1]
     fc= mg.dispatchables.fuel_cell[1]
@@ -643,8 +727,8 @@ function DP_jopt(K::Int64, pen::Float64,Pnl::Vector{Float64},mg,d_rt::Float64=de
     hytank = mg.tanks.h2Tank
     dt = mg.project.timestep
    
-    nEbt =20
-    nloh = 20
+    nEbt =40
+    nloh = 40
    
     Ebt_grid = range(bt.energy_rated * bt.SoC_min, bt.energy_rated * bt.SoC_max, nEbt)
     LoH_grid = range(hytank.capacity * hytank.min_filling_ratio, hytank.capacity * hytank.max_filling_ratio, nloh)
@@ -672,15 +756,15 @@ function DP_jopt(K::Int64, pen::Float64,Pnl::Vector{Float64},mg,d_rt::Float64=de
 
                 xk = State(Pnl[k], LoH_grid[loh], Ebt_grid[ebt], δ_grid[δ])
 
-                nu = u_range!(selectdim(Pbt_grid, 1, threadid()), xk, mg, 10, 12, 6) #peut changer de taille à régler
+                nu = u_range!(selectdim(Pbt_grid, 1, threadid()-1), xk, mg, 10, 12, 6) #peut changer de taille à régler
                 
                 #CREATE UGRID
                 Jk_xu_min = Inf
-                u_opt = Pbt_grid[threadid(), 1]
+                u_opt = Pbt_grid[threadid()-1, 1]
 
 
                 @inbounds for u_i = 1:nu  #gérer les situations où il n'y pas de u
-                    uk = Pbt_grid[threadid(), u_i]
+                    uk = Pbt_grid[threadid()-1, u_i]
                     Jk_xu = 0.0
 
 

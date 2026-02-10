@@ -77,8 +77,13 @@ function time_dyn_backward!(time::Array{Float32,1}, dt::Float32, mi_l::Vector{In
             next_di = time[2] - 1
             next_mi = time[3]
         else
+            if time[3]==1
+                next_di=30
+                next_mi=12
+            else
             next_di = mi_l[Int(time[3])-1]
             next_mi = time[3] - 1
+            end
         end
     end
 
@@ -97,8 +102,8 @@ TBW
 function bt_bounds(x, bt,dt)
    
        
-        Pdis_max = min((x.Ebatt - bt.energy_rated * bt.SoC_min) / ((1 + bt.loss_factor) * dt), bt.energy_rated * bt.discharge_rate)
-        Pcha_max = max((x.Ebatt - bt.energy_rated * bt.SoC_max) / ((1 - bt.loss_factor) * dt), -bt.energy_rated * bt.charge_rate)
+        Pdis_max = min((x.Ebatt - bt.energy_rated * bt.SoC_min) / ((1.0f0 + bt.loss_factor) * dt), bt.energy_rated * bt.discharge_rate)
+        Pcha_max = max((x.Ebatt - bt.energy_rated * bt.SoC_max) / ((1.0f0 - bt.loss_factor) * dt), -bt.energy_rated * bt.charge_rate)
 
     return Pcha_max, Pdis_max
 end
@@ -140,12 +145,28 @@ function u_bounds(x, fc,el,hytank,bt,dt)
         u_max = min(Pdis_max, x.Pnl)
         u_min = ifelse(Pfc_max >= x.Pnl, max(Pcha_max, x.Pnl - Pfc_max), min(Pdis_max, x.Pnl - Pfc_max))
     else
-        u_max = max(min(x.Pnl - Pel_max, 0.0f0), Pcha_max)
+        u_max = ifelse(x.Pnl<=Pel_min,max(min(x.Pnl - Pel_max, 0.0), Pcha_max),max(Pcha_max,x.Pnl))
         u_min = max(Pcha_max, x.Pnl- Pfc_max)
     end
 
     return u_min, u_max, Pel_min, Pfc_min
 end
+function u_bounds_all(x, fc,el,hytank,bt,dt)
+   
+    Pel_max, Pfc_max, Pel_min, Pfc_min = h2_bounds(x, fc,el,hytank,dt)
+    Pcha_max, Pdis_max = bt_bounds(x, bt,dt)
+
+    if x.Pnl >= 0.0f0
+        u_max = min(Pdis_max, x.Pnl)
+        u_min = ifelse(Pfc_max >= x.Pnl, max(Pcha_max, x.Pnl - Pfc_max), min(Pdis_max, x.Pnl - Pfc_max))
+    else
+        u_max = max(min(x.Pnl - Pel_max, 0.0f0), Pcha_max)
+        u_min = max(Pcha_max, x.Pnl- Pfc_max)
+    end
+
+    return u_min, u_max, max(Pel_min,Pel_max), min(Pfc_min,Pfc_max)
+end
+
 
 
 """
@@ -337,7 +358,7 @@ function dynamic(x, Pbt,Pnl_next, fc,el,hytank,bt,dt)
     E_bt_next = max(0.0f0, min(x.Ebatt - (Pbt + bt.loss_factor * abs(Pbt)) * dt, bt.energy_rated))
     Pshed = Pnl - Pbt - PH2
 
-    return LoH_next, E_bt_next, δ_next, Pshed,PH2
+    return Float32(LoH_next), Float32(E_bt_next), δ_next, Float32(Pshed),Float32(PH2)
 
 end
 function dynamic2(x, x_next,Pbt,Pnl_next, fc,el,hytank,bt,dt)
@@ -405,16 +426,17 @@ end
 
 TBW
 """
-function gen_mark_c(probs,cats,ini)
+function gen_mark(probs,cats,ini,mod,data=data)
 
     Pnl=zeros(Float32,8760)
     Pnl[1]=ini
-    for i=2:8760
+    cat=Int(abs(div(Pnl[1] - cats[1, 1, 1], cats[1,1, 2] - cats[1,1,1])) + 1)
+  @inbounds  for i=2:8760
         h=data.Hour[i]
         m=data.Month[i]
          h_prev=data.Hour[i-1]
         m_prev=data.Month[i-1]
-       cat = Int(abs(div(Pnl[i-1] - cats[m_prev, h_prev+1, 1], cats[m_prev, h_prev+1, 2] - cats[m_prev, h_prev+1, 1])) + 1)
+       
 
         if cat > 16
             cat = 16
@@ -424,7 +446,7 @@ function gen_mark_c(probs,cats,ini)
         z=0
         
         
-            for j=1:length(probs[m_prev,h_prev+1,:,cat])
+          @inbounds  for j=1:length(probs[m_prev,h_prev+1,:,cat])
                
                 if probs[m_prev,h_prev+1,j,cat] > 0.0f0
                     z=z+1
@@ -432,7 +454,19 @@ function gen_mark_c(probs,cats,ini)
                     prob_val[z]=probs[m_prev,h_prev+1,j,cat]
                 end
             end
-        Pnl[i]=cats[m,h+1,indexes[sample(Weights(prob_val))]+1]
+            index_w=sample(Weights(prob_val))
+            if mod==1
+                Pnl[i]=cats[m,h+1,indexes[index_w]]
+            elseif mod==2
+                Pnl[i]=(cats[m,h+1,indexes[index_w]]+cats[m,h+1,indexes[index_w]+1])/2
+            elseif mod==3
+                Pnl[i]=cats[m,h+1,indexes[index_w]+1]
+            elseif mod==4
+                Pnl[i]=cats[m,h+1,indexes[index_w]] + rand()*(cats[m,h+1,indexes[index_w]+1]-cats[m,h+1,indexes[index_w]])
+            end
+
+                cat = indexes[index_w]
+        
     end
     return Pnl
 end
@@ -442,7 +476,7 @@ end
 
 TBW
 """
-function CRF(i::Float32, T)
+function CRF(i, T)
     if i != 0.0f0
         a = (1 + i)^T
         return i * a / (a - 1)
@@ -458,12 +492,33 @@ function dispatch_1(s::State, fc,el,hytank,bt,dt)
 
     Pbatt_cmax, Pbatt_dmax = bt_bounds(s, bt,dt)
     Pel_max, Pfc_max, Pel_min, Pfc_min = h2_bounds(s,fc,el,hytank,dt)
-    Pnl, Pgen, Pbatt, Pspill, Pshed, Pdump, Pelyz, Pfc = Microgrids.dispatch_1(s.Pnl, Pbatt_cmax, Pbatt_dmax, 0.0f0, 0.0f0, Pel_min, Pel_max, Pfc_min, Pfc_max)
+    Pnl, Pgen, Pbatt, Pspill, Pshed, Pdump, Pelyz, Pfc = Microgrids.dispatch_1(s.Pnl, Pbatt_cmax, Pbatt_dmax, 0.0f0, 0.0f0, -Pel_min, -Pel_max, Pfc_min, Pfc_max)
 
-    return Pbatt, Pfc - Pelyz
+    return Float32(Pbatt) #, Pfc - Pelyz
+end
+function dispatch_2(s::State, fc,el,hytank,bt,dt)
+
+    Pbatt_cmax, Pbatt_dmax =  bt_bounds(s, bt,dt)
+    Pel_max, Pfc_max, Pel_min, Pfc_min = h2_bounds(s,fc,el,hytank,dt)
+    Pnl, Pgen, Pbatt, Pspill, Pshed, Pdump, Pelyz, Pfc = Microgrids.dispatch_2(s.Pnl, Pbatt_cmax, Pbatt_dmax, 0.f0, 0.f0, -Pel_min, -Pel_max, Pfc_min, Pfc_max)
+
+    return Float32(Pbatt) #, Pfc - Pelyz
 end
 
-function cost_to_go(pen::Float32,Pshed,Ph2,Pbt,δ,fc,el,bt,d_rt::Float32=deg_ratio_rt,d_st::Float32=deg_ratio_st,Eol::Float32=0.10f0)
+function u2alpha3(u,s,fc,el,hytank,bt,dt,ϵ=0.001f0)
+α=0.0f0
+
+Pbt_min, Pbt_max, Pel_min, Pfc_min = u_bounds(s,fc,el,hytank,bt,dt)
+Pnl=s.Pnl
+u1,u2,u3=ifelse(Pnl>=0.0f0,(Pbt_max,max(Pbt_min,0.0f0),Pbt_min),(max(Pbt_min,Pnl),Pbt_max,Pbt_min))
+ifelse((min(u1,u2) -ϵ) <=u<= (max(u1,u2) +ϵ),ifelse(u1==u2,1.0f0,(u-u2)/(u1-u2)),ifelse(u2==u3,0.0f0,(u-u2)/(u2-u3)))  
+    
+return Float32(α)
+end
+    
+
+
+function cost_to_go(pen::Float32,Pshed,Ph2,Pbt,δ,fc,el,bt,d_rt=deg_ratio_rt,d_st=deg_ratio_st,Eol=0.10f0)
    
     c=0.f0
     c+= pen * max(0.0f0, Pshed)
@@ -695,7 +750,7 @@ function DPrecursion_jopt(K::Int32, pen::Float32,ref::Vector{Float32},σ::Float3
     return Jopt
 
 end
-function DP_jopt(K::Int32, pen::Float32,Pnl::Vector{Float32},mg)
+function DP_jopt(K, pen,Pnl,mg)
 
      bt = mg.storage
     el = mg.electrolyzer[1]
@@ -1255,7 +1310,7 @@ function sdp_simu_jopt_mc(Jopt, n, pen, mg1, Pnl_cate, Pnl_prob,Pnl;mode::Int32=
     hytank = mg1.tanks.h2Tank
     dt = mg1.project.timestep
     Pren = zeros(Float32,n)
-   Pren = production(mg1.nondispatchables[1]) .+ production(mg1.nondispatchables[2])
+   Pren = Float32.(production(mg1.nondispatchables[1]) .+ production(mg1.nondispatchables[2]))
 
     Pbt = zeros(Float32,n)
     Pel = zeros(Float32,n)
@@ -1374,7 +1429,7 @@ function sdp_simu_jopt_mc(Jopt, n, pen, mg1, Pnl_cate, Pnl_prob,Pnl;mode::Int32=
 
 
     end
-    traj = OperationTraj(Pnl, Pshed, Pren, Pgen, Pfc, Pel, Phb, Ebt, Pbt, Loh, Lof, Pspill, Pdump)
+    traj = OperationTraj(Float64.(Pnl),Float64.(Pshed), Float64.(Pren), Float64.(Pgen), Float64.(Pfc), Float64.(Pel), Float64.(Phb), Float64.(Ebt), Float64.(Pbt), Float64.(Loh), Float64.(Lof), Float64.(Pspill), Float64.(Pdump))
     stats = aggregation(mg1, traj)
     # Eval the microgrid costs
     costs = economics(mg1, stats)
